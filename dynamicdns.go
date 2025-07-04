@@ -38,11 +38,11 @@ type App struct {
 	// The sources from which to get the server's public IP address.
 	// Multiple sources can be specified for redundancy.
 	// Default: simple_http
-	IPSourcesRaw []json.RawMessage `json:"ip_sources,omitempty" caddy:"namespace=dynamic_dns.ip_sources inline_key=source"`
+	IPSourcesRaw []json.RawMessage `json:"ip_sources,omitzero" caddy:"namespace=dynamic_dns.ip_sources inline_key=source"`
 
 	// The configuration for the DNS provider with which the DNS
 	// records will be updated.
-	DNSProviderRaw json.RawMessage `json:"dns_provider,omitempty" caddy:"namespace=dns.providers inline_key=name"`
+	DNSProviderRaw json.RawMessage `json:"dns_provider,omitzero" caddy:"namespace=dns.providers inline_key=name"`
 
 	// The record names, keyed by DNS zone, for which to update the A/AAAA records.
 	// Record names are relative to the zone. The zone is usually your registered
@@ -51,25 +51,28 @@ type App struct {
 	// For example, assuming your zone is example.com, and you want to update A/AAAA
 	// records for "example.com" and "www.example.com" so that they resolve to this
 	// Caddy instance, configure like so: `"example.com": ["@", "www"]`
-	Domains map[string][]string `json:"domains,omitempty"`
+	Domains map[string][]string `json:"domains,omitzero"`
+
+	// Retries when update failed
+	Retries uint32 `json:"retries,omitzero"`
 
 	// If enabled, no new DNS records will be created. Only existing records will be updated.
 	// This means that the A or AAAA records need to be created manually ahead of time.
-	UpdateOnly bool `json:"update_only,omitempty"`
+	UpdateOnly bool `json:"update_only,omitzero"`
 
 	// If enabled, the "http" app's config will be scanned to assemble the list
 	// of domains for which to enable dynamic DNS updates.
-	DynamicDomains bool `json:"dynamic_domains,omitempty"`
+	DynamicDomains bool `json:"dynamic_domains,omitzero"`
 
 	// The IP versions to enable. By default, both "ipv4" and "ipv6" will be enabled.
 	// To disable IPv6, specify {"ipv6": false}.
-	Versions IPVersions `json:"versions,omitempty"`
+	Versions IPVersions `json:"versions,omitzero"`
 
 	// How frequently to check the public IP address. Default: 30m
-	CheckInterval caddy.Duration `json:"check_interval,omitempty"`
+	CheckInterval caddy.Duration `json:"check_interval,omitzero"`
 
 	// The TTL to set on DNS records.
-	TTL caddy.Duration `json:"ttl,omitempty"`
+	TTL caddy.Duration `json:"ttl,omitzero"`
 
 	ipSources   []IPSource
 	dnsProvider libdns.RecordSetter
@@ -232,6 +235,10 @@ func (a App) checkIPAndUpdateDNS() {
 		return
 	}
 
+	if a.Retries < 1 {
+		a.Retries = 1
+	}
+
 	for zone, addresses := range updatedRecsByZone {
 		records := make([]libdns.Record, len(addresses))
 		for i, rec := range addresses {
@@ -244,11 +251,23 @@ func (a App) checkIPAndUpdateDNS() {
 			)
 			records[i] = rec
 		}
-		if _, err = a.dnsProvider.SetRecords(a.ctx, zone, records); err != nil {
-			a.logger.Error("failed setting DNS record(s) with new IP address(es)",
+		for range a.Retries {
+			if _, err = a.dnsProvider.SetRecords(a.ctx, zone, records); err != nil {
+				a.logger.Error("failed setting DNS record(s) with new IP address(es)",
+					zap.String("zone", zone),
+					zap.Error(err),
+				)
+			} else {
+				a.logger.Info("updated DNS record", zap.String("zone", zone))
+				break
+			}
+		}
+		if err != nil {
+			a.logger.Error("all attempts failed when setting DNS record(s)",
 				zap.String("zone", zone),
 				zap.Error(err),
 			)
+			continue
 		}
 		for _, rec := range addresses {
 			name := libdns.AbsoluteName(rec.Name, zone)
@@ -410,8 +429,8 @@ func ipListContains(list []netip.Addr, ip netip.Addr) bool {
 // IPVersions is the IP versions to enable for dynamic DNS.
 // Versions are enabled if true or nil, set to false to disable.
 type IPVersions struct {
-	IPv4 *bool `json:"ipv4,omitempty"`
-	IPv6 *bool `json:"ipv6,omitempty"`
+	IPv4 *bool `json:"ipv4,omitzero"`
+	IPv6 *bool `json:"ipv6,omitzero"`
 }
 
 // V4Enabled returns true if IPv4 is enabled.
