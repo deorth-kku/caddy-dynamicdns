@@ -241,30 +241,39 @@ func (a App) checkIPAndUpdateDNS() error {
 	// make sure the source returns tidy info; duplicates are wasteful
 	currentIPs = removeDuplicateIPs(currentIPs)
 
-	// do a diff of current and previous IPs to make DNS records to update
+	desiredIPsByType := groupIPsByType(currentIPs)
+
+	// do a diff of current and previous RRsets to make DNS records to update
 	updatedRecsByZone := make(map[string][]libdns.Address)
-	for _, ip := range currentIPs {
-		for zone, domains := range allDomains {
-			for _, domain := range domains {
-				oldIps, found := lastIPs[libdns.AbsoluteName(domain, zone)][recordType(ip)]
+	for zone, domains := range allDomains {
+		for _, domain := range domains {
+			name := libdns.AbsoluteName(domain, zone)
+			lastIPsByType := lastIPs[name]
+			for _, recType := range enabledRecordTypes(a.Versions) {
+				desiredIPs := desiredIPsByType[recType]
+				oldIPs, found := lastIPsByType[recType]
+				oldIPs = normalizeIPs(oldIPs)
+
 				if !found && a.UpdateOnly {
 					a.logger.Debug("record doesn't exist; skipping update",
 						zap.String("zone", zone),
 						zap.String("name", domain),
+						zap.String("type", recType),
 					)
 					continue
 				}
 
-				if found && ipListContains(oldIps, ip) {
-					// IP is not different and no new domains to manage; no update needed
+				if ipListsEqual(oldIPs, desiredIPs) {
 					continue
 				}
 
-				updatedRecsByZone[zone] = append(updatedRecsByZone[zone], libdns.Address{
-					Name: domain,
-					TTL:  time.Duration(a.TTL),
-					IP:   ip,
-				})
+				for _, ip := range desiredIPs {
+					updatedRecsByZone[zone] = append(updatedRecsByZone[zone], libdns.Address{
+						Name: domain,
+						TTL:  time.Duration(a.TTL),
+						IP:   ip,
+					})
+				}
 			}
 		}
 	}
@@ -308,15 +317,25 @@ func (a App) checkIPAndUpdateDNS() error {
 			)
 			continue
 		}
+		updatedIPs := make(domainTypeIPs)
 		for _, rec := range addresses {
 			name := libdns.AbsoluteName(rec.Name, zone)
+			if updatedIPs[name] == nil {
+				updatedIPs[name] = make(map[string][]netip.Addr)
+			}
+			recType := recordType(rec.IP)
+			updatedIPs[name][recType] = append(updatedIPs[name][recType], rec.IP)
+		}
+		for name, ipsByType := range updatedIPs {
 			if lastIPs == nil {
 				lastIPs = make(domainTypeIPs)
 			}
 			if lastIPs[name] == nil {
 				lastIPs[name] = make(map[string][]netip.Addr)
 			}
-			lastIPs[name][recordType(rec.IP)] = []netip.Addr{rec.IP}
+			for recType, ips := range ipsByType {
+				lastIPs[name][recType] = removeDuplicateIPs(ips)
+			}
 		}
 	}
 
@@ -343,7 +362,7 @@ func (a App) lookupCurrentIPsFromDNS(domains map[string][]string) (domainTypeIPs
 				return nil, err
 			}
 
-			recMap := make(map[string]map[string]netip.Addr)
+			recMap := make(map[string]map[string][]netip.Addr)
 			for _, r := range recs {
 				ar, ok := r.(libdns.Address)
 				if !ok {
@@ -353,16 +372,16 @@ func (a App) lookupCurrentIPsFromDNS(domains map[string][]string) (domainTypeIPs
 				a.logger.Debug("found DNS record", zap.String("type", recType), zap.String("name", ar.Name), zap.String("zone", zone), zap.String("value", ar.IP.String()))
 				name := libdns.AbsoluteName(ar.Name, zone)
 				if _, ok := recMap[name]; !ok {
-					recMap[name] = make(map[string]netip.Addr)
+					recMap[name] = make(map[string][]netip.Addr)
 				}
-				recMap[name][recType] = ar.IP
+				recMap[name][recType] = append(recMap[name][recType], ar.IP)
 			}
 			for _, n := range names {
 				name := libdns.AbsoluteName(n, zone)
 				ips := make(map[string][]netip.Addr)
 				for _, t := range []string{recordTypeA, recordTypeAAAA} {
-					if ip, ok := recMap[name][t]; ok {
-						ips[t] = []netip.Addr{ip}
+					if recIPs := normalizeIPs(recMap[name][t]); len(recIPs) > 0 {
+						ips[t] = recIPs
 					} else {
 						a.logger.Info("domain not found in DNS", zap.String("domain", name), zap.String("type", t))
 						ips[t] = []netip.Addr{nilIP}
@@ -444,6 +463,39 @@ func recordType(addr netip.Addr) string {
 	return recordTypeAAAA
 }
 
+func enabledRecordTypes(versions IPVersions) []string {
+	var recordTypes []string
+	if versions.V4Enabled() {
+		recordTypes = append(recordTypes, recordTypeA)
+	}
+	if versions.V6Enabled() {
+		recordTypes = append(recordTypes, recordTypeAAAA)
+	}
+	return recordTypes
+}
+
+func groupIPsByType(ips []netip.Addr) map[string][]netip.Addr {
+	grouped := make(map[string][]netip.Addr)
+	for _, ip := range ips {
+		grouped[recordType(ip)] = append(grouped[recordType(ip)], ip)
+	}
+	for recType, recIPs := range grouped {
+		grouped[recType] = removeDuplicateIPs(recIPs)
+	}
+	return grouped
+}
+
+func normalizeIPs(ips []netip.Addr) []netip.Addr {
+	clean := make([]netip.Addr, 0, len(ips))
+	for _, ip := range ips {
+		if !ip.IsValid() {
+			continue
+		}
+		clean = append(clean, ip)
+	}
+	return removeDuplicateIPs(clean)
+}
+
 // removeDuplicateIPs returns ips without duplicates.
 func removeDuplicateIPs(ips []netip.Addr) []netip.Addr {
 	uniqueIPs := make(map[string]netip.Addr)
@@ -455,6 +507,20 @@ func removeDuplicateIPs(ips []netip.Addr) []netip.Addr {
 		clean = append(clean, ip)
 	}
 	return clean
+}
+
+func ipListsEqual(a, b []netip.Addr) bool {
+	a = normalizeIPs(a)
+	b = normalizeIPs(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for _, ip := range a {
+		if !ipListContains(b, ip) {
+			return false
+		}
+	}
+	return true
 }
 
 // ipListContains returns true if list contains ip; false otherwise.
