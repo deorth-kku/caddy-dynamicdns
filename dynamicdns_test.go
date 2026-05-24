@@ -11,8 +11,10 @@ import (
 )
 
 type fakeDNSProvider struct {
-	getRecords []libdns.Record
-	setCalls   [][]libdns.Record
+	getRecords  []libdns.Record
+	appendCalls [][]libdns.Record
+	deleteCalls [][]libdns.Record
+	setCalls    [][]libdns.Record
 }
 
 func (f *fakeDNSProvider) GetRecords(_ context.Context, _ string) ([]libdns.Record, error) {
@@ -22,6 +24,18 @@ func (f *fakeDNSProvider) GetRecords(_ context.Context, _ string) ([]libdns.Reco
 func (f *fakeDNSProvider) SetRecords(_ context.Context, _ string, recs []libdns.Record) ([]libdns.Record, error) {
 	copied := append([]libdns.Record(nil), recs...)
 	f.setCalls = append(f.setCalls, copied)
+	return copied, nil
+}
+
+func (f *fakeDNSProvider) AppendRecords(_ context.Context, _ string, recs []libdns.Record) ([]libdns.Record, error) {
+	copied := append([]libdns.Record(nil), recs...)
+	f.appendCalls = append(f.appendCalls, copied)
+	return copied, nil
+}
+
+func (f *fakeDNSProvider) DeleteRecords(_ context.Context, _ string, recs []libdns.Record) ([]libdns.Record, error) {
+	copied := append([]libdns.Record(nil), recs...)
+	f.deleteCalls = append(f.deleteCalls, copied)
 	return copied, nil
 }
 
@@ -61,7 +75,7 @@ func TestLookupCurrentIPsFromDNSPreservesMultipleRecords(t *testing.T) {
 	}
 }
 
-func TestCheckIPAndUpdateDNSSubmitsWholeRRSet(t *testing.T) {
+func TestCheckIPAndUpdateDNSReplacesWholeRRSetWithAppenderAndDeleter(t *testing.T) {
 	previousLastIPs := lastIPs
 	lastIPs = nil
 	t.Cleanup(func() {
@@ -93,15 +107,24 @@ func TestCheckIPAndUpdateDNSSubmitsWholeRRSet(t *testing.T) {
 
 	app.checkIPAndUpdateDNS()
 
-	if len(provider.setCalls) != 1 {
-		t.Fatalf("expected 1 SetRecords call, got %d", len(provider.setCalls))
+	if len(provider.setCalls) != 0 {
+		t.Fatalf("expected 0 SetRecords calls, got %d", len(provider.setCalls))
 	}
-	if len(provider.setCalls[0]) != 2 {
-		t.Fatalf("expected 2 records in SetRecords call, got %d", len(provider.setCalls[0]))
+	if len(provider.deleteCalls) != 1 {
+		t.Fatalf("expected 1 DeleteRecords call, got %d", len(provider.deleteCalls))
+	}
+	if len(provider.appendCalls) != 1 {
+		t.Fatalf("expected 1 AppendRecords call, got %d", len(provider.appendCalls))
+	}
+	if len(provider.deleteCalls[0]) != 2 {
+		t.Fatalf("expected 2 records in DeleteRecords call, got %d", len(provider.deleteCalls[0]))
+	}
+	if len(provider.appendCalls[0]) != 2 {
+		t.Fatalf("expected 2 records in AppendRecords call, got %d", len(provider.appendCalls[0]))
 	}
 
-	gotIPs := make([]netip.Addr, 0, len(provider.setCalls[0]))
-	for _, rec := range provider.setCalls[0] {
+	gotIPs := make([]netip.Addr, 0, len(provider.appendCalls[0]))
+	for _, rec := range provider.appendCalls[0] {
 		addr, ok := rec.(libdns.Address)
 		if !ok {
 			t.Fatalf("expected libdns.Address record, got %T", rec)

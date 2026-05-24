@@ -244,7 +244,7 @@ func (a App) checkIPAndUpdateDNS() error {
 	desiredIPsByType := groupIPsByType(currentIPs)
 
 	// do a diff of current and previous RRsets to make DNS records to update
-	updatedRecsByZone := make(map[string][]libdns.Address)
+	changesByZone := make(map[string][]rrsetChange)
 	for zone, domains := range allDomains {
 		for _, domain := range domains {
 			name := libdns.AbsoluteName(domain, zone)
@@ -267,18 +267,18 @@ func (a App) checkIPAndUpdateDNS() error {
 					continue
 				}
 
-				for _, ip := range desiredIPs {
-					updatedRecsByZone[zone] = append(updatedRecsByZone[zone], libdns.Address{
-						Name: domain,
-						TTL:  time.Duration(a.TTL),
-						IP:   ip,
-					})
-				}
+				changesByZone[zone] = append(changesByZone[zone], rrsetChange{
+					Name:   domain,
+					Type:   recType,
+					OldIPs: oldIPs,
+					NewIPs: desiredIPs,
+					TTL:    time.Duration(a.TTL),
+				})
 			}
 		}
 	}
 
-	if len(updatedRecsByZone) == 0 {
+	if len(changesByZone) == 0 {
 		a.logger.Debug("no IP address change; no update needed")
 		return nil
 	}
@@ -287,21 +287,11 @@ func (a App) checkIPAndUpdateDNS() error {
 		a.Retries = 1
 	}
 
-	for zone, addresses := range updatedRecsByZone {
-		records := make([]libdns.Record, len(addresses))
-		for i, rec := range addresses {
-			a.logger.Info("updating DNS record",
-				zap.String("zone", zone),
-				zap.String("type", recordType(rec.IP)),
-				zap.String("name", rec.Name),
-				zap.String("ip", rec.IP.String()),
-				zap.Duration("ttl", rec.TTL),
-			)
-			records[i] = rec
-		}
+	for zone, changes := range changesByZone {
 		for range a.Retries {
-			if _, err = a.dnsProvider.SetRecords(a.ctx, zone, records); err != nil {
-				a.logger.Error("failed setting DNS record(s) with new IP address(es)",
+			err = a.applyZoneChanges(zone, changes)
+			if err != nil {
+				a.logger.Error("failed applying DNS record change(s)",
 					zap.String("zone", zone),
 					zap.Error(err),
 				)
@@ -311,20 +301,19 @@ func (a App) checkIPAndUpdateDNS() error {
 			}
 		}
 		if err != nil {
-			a.logger.Error("all attempts failed when setting DNS record(s)",
+			a.logger.Error("all attempts failed when applying DNS record change(s)",
 				zap.String("zone", zone),
 				zap.Error(err),
 			)
 			continue
 		}
 		updatedIPs := make(domainTypeIPs)
-		for _, rec := range addresses {
-			name := libdns.AbsoluteName(rec.Name, zone)
+		for _, change := range changes {
+			name := libdns.AbsoluteName(change.Name, zone)
 			if updatedIPs[name] == nil {
 				updatedIPs[name] = make(map[string][]netip.Addr)
 			}
-			recType := recordType(rec.IP)
-			updatedIPs[name][recType] = append(updatedIPs[name][recType], rec.IP)
+			updatedIPs[name][change.Type] = append([]netip.Addr(nil), change.NewIPs...)
 		}
 		for name, ipsByType := range updatedIPs {
 			if lastIPs == nil {
@@ -347,6 +336,72 @@ func (a App) checkIPAndUpdateDNS() error {
 		zap.Strings("current_ips", currentIPStrings))
 
 	return nil
+}
+
+func (a App) applyZoneChanges(zone string, changes []rrsetChange) error {
+	if replacer, ok := a.dnsProvider.(recordReplacer); ok {
+		return a.replaceZoneRRsets(zone, changes, replacer)
+	}
+	return a.setZoneRRsets(zone, changes)
+}
+
+func (a App) replaceZoneRRsets(zone string, changes []rrsetChange, replacer recordReplacer) error {
+	var deletes []libdns.Record
+	var appends []libdns.Record
+	for _, change := range changes {
+		for _, rec := range change.oldRecords() {
+			address := rec.(libdns.Address)
+			a.logger.Info("deleting DNS record",
+				zap.String("zone", zone),
+				zap.String("type", change.Type),
+				zap.String("name", address.Name),
+				zap.String("ip", address.IP.String()),
+			)
+			deletes = append(deletes, rec)
+		}
+		for _, rec := range change.newRecords() {
+			address := rec.(libdns.Address)
+			a.logger.Info("creating DNS record",
+				zap.String("zone", zone),
+				zap.String("type", change.Type),
+				zap.String("name", address.Name),
+				zap.String("ip", address.IP.String()),
+				zap.Duration("ttl", address.TTL),
+			)
+			appends = append(appends, rec)
+		}
+	}
+
+	if len(deletes) > 0 {
+		if _, err := replacer.DeleteRecords(a.ctx, zone, deletes); err != nil {
+			return err
+		}
+	}
+	if len(appends) > 0 {
+		if _, err := replacer.AppendRecords(a.ctx, zone, appends); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a App) setZoneRRsets(zone string, changes []rrsetChange) error {
+	records := make([]libdns.Record, 0)
+	for _, change := range changes {
+		for _, rec := range change.newRecords() {
+			address := rec.(libdns.Address)
+			a.logger.Info("updating DNS record",
+				zap.String("zone", zone),
+				zap.String("type", change.Type),
+				zap.String("name", address.Name),
+				zap.String("ip", address.IP.String()),
+				zap.Duration("ttl", address.TTL),
+			)
+			records = append(records, rec)
+		}
+	}
+	_, err := a.dnsProvider.SetRecords(a.ctx, zone, records)
+	return err
 }
 
 // lookupCurrentIPsFromDNS looks up the current IP addresses
@@ -608,6 +663,39 @@ func (ip IPVersions) V6Enabled() bool {
 }
 
 type domainTypeIPs map[string]map[string][]netip.Addr
+
+type recordReplacer interface {
+	libdns.RecordAppender
+	libdns.RecordDeleter
+}
+
+type rrsetChange struct {
+	Name   string
+	Type   string
+	OldIPs []netip.Addr
+	NewIPs []netip.Addr
+	TTL    time.Duration
+}
+
+func (c rrsetChange) oldRecords() []libdns.Record {
+	return ipRecords(c.Name, c.OldIPs, c.TTL)
+}
+
+func (c rrsetChange) newRecords() []libdns.Record {
+	return ipRecords(c.Name, c.NewIPs, c.TTL)
+}
+
+func ipRecords(name string, ips []netip.Addr, ttl time.Duration) []libdns.Record {
+	records := make([]libdns.Record, 0, len(ips))
+	for _, ip := range ips {
+		records = append(records, libdns.Address{
+			Name: name,
+			TTL:  ttl,
+			IP:   ip,
+		})
+	}
+	return records
+}
 
 // Remember what the last IPs are so that we
 // don't try to update DNS records every
