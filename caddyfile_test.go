@@ -41,8 +41,7 @@ func Test_ParseApp(t *testing.T) {
 					{
 						"source": "upnp"
 					}
-				],
-				"versions": {}
+				]
 			}`,
 		},
 		{
@@ -62,8 +61,7 @@ func Test_ParseApp(t *testing.T) {
 						"source": "simple_http",
 						"endpoints": ["http://2.com"]
 					}
-				],
-				"versions": {}
+				]
 			}`,
 		},
 		{
@@ -87,8 +85,7 @@ func Test_ParseApp(t *testing.T) {
 						"source": "simple_http",
 						"endpoints": ["http://2.com"]
 					}
-				],
-				"versions": {}
+				]
 			}`,
 		},
 		{
@@ -103,8 +100,7 @@ func Test_ParseApp(t *testing.T) {
 						"name": "eth0",
 						"source": "interface"
 					}
-				],
-				"versions": {}
+				]
 			}`,
 		},
 		{
@@ -148,8 +144,7 @@ func Test_ParseApp(t *testing.T) {
 					"sub.example": [
 						"@"
 					]
-				},
-				"versions": {}
+				}
  			}`,
 		},
 		{
@@ -168,8 +163,7 @@ func Test_ParseApp(t *testing.T) {
 				"exclude": [
 					"192.168.10.0/24",
 					"2001:db8:85a3:1234::/64"
-				],
-				"versions": {}
+				]
 			}`,
 		},
 		{
@@ -180,8 +174,7 @@ func Test_ParseApp(t *testing.T) {
 				}
 			`),
 			want: `{
-				"include": [ "192.168.0.0/16" ],
-				"versions": {}
+				"include": [ "192.168.0.0/16" ]
 			}`,
 		},
 		{
@@ -192,8 +185,7 @@ func Test_ParseApp(t *testing.T) {
 				}
 			`),
 			want: `{
-				"exclude": [ "192.168.0.0/16" ],
-				"versions": {}
+				"exclude": [ "192.168.0.0/16" ]
 			}`,
 		},
 		{

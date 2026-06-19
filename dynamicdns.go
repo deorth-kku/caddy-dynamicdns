@@ -512,7 +512,7 @@ func (a App) allDomains() map[string][]string {
 
 // recordType returns the DNS record type associated with the version of ip.
 func recordType(addr netip.Addr) string {
-	if addr.Is4() {
+	if canonicalIP(addr).Is4() {
 		return recordTypeA
 	}
 	return recordTypeAAAA
@@ -532,6 +532,7 @@ func enabledRecordTypes(versions IPVersions) []string {
 func groupIPsByType(ips []netip.Addr) map[string][]netip.Addr {
 	grouped := make(map[string][]netip.Addr)
 	for _, ip := range ips {
+		ip = canonicalIP(ip)
 		grouped[recordType(ip)] = append(grouped[recordType(ip)], ip)
 	}
 	for recType, recIPs := range grouped {
@@ -546,7 +547,7 @@ func normalizeIPs(ips []netip.Addr) []netip.Addr {
 		if !ip.IsValid() {
 			continue
 		}
-		clean = append(clean, ip)
+		clean = append(clean, canonicalIP(ip))
 	}
 	return removeDuplicateIPs(clean)
 }
@@ -555,6 +556,7 @@ func normalizeIPs(ips []netip.Addr) []netip.Addr {
 func removeDuplicateIPs(ips []netip.Addr) []netip.Addr {
 	uniqueIPs := make(map[string]netip.Addr)
 	for _, ip := range ips {
+		ip = canonicalIP(ip)
 		uniqueIPs[ip.String()] = ip
 	}
 	clean := make([]netip.Addr, 0, len(uniqueIPs))
@@ -688,6 +690,7 @@ func (c rrsetChange) newRecords() []libdns.Record {
 func ipRecords(name string, ips []netip.Addr, ttl time.Duration) []libdns.Record {
 	records := make([]libdns.Record, 0, len(ips))
 	for _, ip := range ips {
+		ip = canonicalIP(ip)
 		records = append(records, libdns.Address{
 			Name: name,
 			TTL:  ttl,
@@ -695,6 +698,13 @@ func ipRecords(name string, ips []netip.Addr, ttl time.Duration) []libdns.Record
 		})
 	}
 	return records
+}
+
+func canonicalIP(ip netip.Addr) netip.Addr {
+	if !ip.IsValid() {
+		return ip
+	}
+	return ip.Unmap()
 }
 
 // Remember what the last IPs are so that we

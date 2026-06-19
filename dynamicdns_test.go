@@ -75,6 +75,33 @@ func TestLookupCurrentIPsFromDNSPreservesMultipleRecords(t *testing.T) {
 	}
 }
 
+func TestLookupCurrentIPsFromDNSUnmapsIPv4InIPv6Records(t *testing.T) {
+	provider := &fakeDNSProvider{
+		getRecords: []libdns.Record{
+			libdns.Address{Name: "@", IP: netip.MustParseAddr("::ffff:203.0.113.10")},
+		},
+	}
+	app := App{
+		ctx:         caddy.Context{Context: context.Background()},
+		logger:      zap.NewNop(),
+		dnsProvider: provider,
+	}
+
+	got, err := app.lookupCurrentIPsFromDNS(map[string][]string{"example.com": {"@"}})
+	if err != nil {
+		t.Fatalf("lookupCurrentIPsFromDNS() error = %v", err)
+	}
+
+	name := libdns.AbsoluteName("@", "example.com")
+	want := netip.MustParseAddr("203.0.113.10")
+	if !ipListsEqual(got[name][recordTypeA], []netip.Addr{want}) {
+		t.Fatalf("expected A records %v, got %v", []netip.Addr{want}, got[name][recordTypeA])
+	}
+	if diff := len(normalizeIPs(got[name][recordTypeAAAA])); diff != 0 {
+		t.Fatalf("expected 0 AAAA records, got %d", diff)
+	}
+}
+
 func TestCheckIPAndUpdateDNSReplacesWholeRRSetWithAppenderAndDeleter(t *testing.T) {
 	previousLastIPs := lastIPs
 	lastIPs = nil
@@ -143,5 +170,61 @@ func TestCheckIPAndUpdateDNSReplacesWholeRRSetWithAppenderAndDeleter(t *testing.
 	name := libdns.AbsoluteName("@", "example.com")
 	if !ipListsEqual(lastIPs[name][recordTypeA], wantIPs) {
 		t.Fatalf("expected cached A records %v, got %v", wantIPs, lastIPs[name][recordTypeA])
+	}
+}
+
+func TestCheckIPAndUpdateDNSUnmapsIPv4InIPv6BeforeSubmittingARecord(t *testing.T) {
+	previousLastIPs := lastIPs
+	lastIPs = nil
+	t.Cleanup(func() {
+		lastIPs = previousLastIPs
+	})
+
+	provider := &fakeDNSProvider{}
+	app := App{
+		ctx:         caddy.Context{Context: context.Background()},
+		logger:      zap.NewNop(),
+		dnsProvider: provider,
+		ipSources: []IPSource{
+			fakeIPSource{
+				ips: []netip.Addr{
+					netip.MustParseAddr("::ffff:203.0.113.10"),
+				},
+			},
+		},
+		Domains: map[string][]string{
+			"example.com": {"@"},
+		},
+	}
+
+	app.checkIPAndUpdateDNS()
+
+	if len(provider.setCalls) != 0 {
+		t.Fatalf("expected 0 SetRecords calls, got %d", len(provider.setCalls))
+	}
+	if len(provider.deleteCalls) != 0 {
+		t.Fatalf("expected 0 DeleteRecords calls, got %d", len(provider.deleteCalls))
+	}
+	if len(provider.appendCalls) != 1 {
+		t.Fatalf("expected 1 AppendRecords call, got %d", len(provider.appendCalls))
+	}
+	if len(provider.appendCalls[0]) != 1 {
+		t.Fatalf("expected 1 record in AppendRecords call, got %d", len(provider.appendCalls[0]))
+	}
+
+	addr, ok := provider.appendCalls[0][0].(libdns.Address)
+	if !ok {
+		t.Fatalf("expected libdns.Address record, got %T", provider.appendCalls[0][0])
+	}
+	if got, want := recordType(addr.IP), recordTypeA; got != want {
+		t.Fatalf("expected record type %s, got %s", want, got)
+	}
+	if got, want := addr.IP, netip.MustParseAddr("203.0.113.10"); got != want {
+		t.Fatalf("expected submitted IP %s, got %s", want, got)
+	}
+
+	name := libdns.AbsoluteName("@", "example.com")
+	if !ipListsEqual(lastIPs[name][recordTypeA], []netip.Addr{netip.MustParseAddr("203.0.113.10")}) {
+		t.Fatalf("expected cached A record %s, got %v", "203.0.113.10", lastIPs[name][recordTypeA])
 	}
 }
