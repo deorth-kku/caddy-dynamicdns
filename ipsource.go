@@ -301,7 +301,6 @@ func (u NetInterface) GetIPs(ctx context.Context, settings IPSettings) ([]netip.
 	}
 
 	ips := []netip.Addr{}
-	foundIPV4, foundIPV6 := false, false
 	for _, addr := range addrs {
 		ipNet, ok := addr.(*net.IPNet)
 		if !ok {
@@ -315,18 +314,13 @@ func (u NetInterface) GetIPs(ctx context.Context, settings IPSettings) ([]netip.
 		if !settings.Contains(addr) {
 			continue
 		}
-		if settings.V4Enabled() && !foundIPV4 && addr.Is4() {
+		if settings.V4Enabled() && addr.Is4() {
 			ips = append(ips, addr)
-			foundIPV4 = true
 			continue
 		}
-		if settings.V6Enabled() && !foundIPV6 && addr.Is6() {
+		if settings.V6Enabled() && addr.Is6() {
 			ips = append(ips, addr)
-			foundIPV6 = true
 			continue
-		}
-		if (foundIPV4 || !settings.V4Enabled()) && (foundIPV6 || !settings.V6Enabled()) {
-			break
 		}
 	}
 
@@ -403,6 +397,7 @@ func ipnetToPrefix(ipNet *net.IPNet) netip.Prefix {
 	if !ok {
 		return netip.Prefix{}
 	}
+	addr = addr.Unmap()
 	prefixSize, _ := ipNet.Mask.Size()
 	return netip.PrefixFrom(addr, prefixSize)
 }
